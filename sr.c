@@ -415,10 +415,11 @@ static int B_packet_received_status[SEQSPACE]; /* To track status: 0=Not Receive
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(struct pkt packet)
 {
-  struct pkt sendpkt;
   int i;
   int received_seq;
   int packet_offset_from_base;
+  struct pkt sendpkt; /* Declare sendpkt at the beginning */
+
 
   /* create ACK packet to send immediately */
   sendpkt.seqnum = 0; /* Sender doesn't care about this for ACKs */
