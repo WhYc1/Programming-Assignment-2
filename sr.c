@@ -79,7 +79,7 @@ void A_send_next_packet() {
     int i;
     int current_seq;
 
-    /* Check if there are messages in the buffer and space in the sender window */
+    /* Check if there are messages in the buffer and space in the sender packet window */
     /* The window check should be based on A_nextseqnum vs A_send_base, representing
        the sequence numbers that can be sent. */
     while (A_message_buffer_count > 0 && (A_nextseqnum - A_send_base + SEQSPACE) % SEQSPACE < WINDOWSIZE) {
@@ -149,46 +149,24 @@ void A_output(struct msg message)
     /* Calculate current number of packets in the sender's packet window */
     current_packet_window_count = (A_nextseqnum - A_send_base + SEQSPACE) % SEQSPACE;
 
-
-    /* Always print a message arrival trace if TRACE > 1, similar to GBN */
-    /* In GBN, this message is tied to whether the window is full or not.
-       Since we buffer Layer 5 messages, the message is always accepted by the transport layer
-       (unless the message buffer is full). Let's adapt the GBN message printing
-       based on the state of the *packet* window when A_output is called.
-    */
-    if (TRACE > 1)
-    {
-        if (current_packet_window_count < WINDOWSIZE)
-        {
-             printf("----A: New message arrives, send window is not full, send new messge to layer3!\n");
-        } else
-        {
-             /* Packet window is full when A_output is called. In GBN this means dropping.
-                In SR, we buffer the Layer 5 message. Let's only print the GBN "window full"
-                message if the message buffer itself is full (very rare).
-             */
-             if (A_message_buffer_count >= 1000)
-             {
-                  if (TRACE > 0) /* Original GBN trace for window full */
-                  {
-                    printf("----A: New message arrives, send window is full\n");
-                  }
-             } else
-             {
-                 /* Packet window is full, but message buffer is not. Message is buffered.
-                    No original GBN trace directly for this state. */
-                 if (TRACE > 3) /* Custom trace */
-                 {
-                   printf("----A: New message arrives, packet window full, buffering message.\n");
-                 }
-             }
-        }
-    }
-
-
     /* Buffer the incoming message from Layer 5 */
     if (A_message_buffer_count < 1000) /* Check if message buffer is not full */
     {
+        /* Standard GBN trace for non-full window (matches gbn.c) */
+        if (current_packet_window_count < WINDOWSIZE) {
+             if (TRACE > 1)
+               printf("----A: New message arrives, send window is not full, send new messge to layer3!\n");
+        } else {
+             /* Standard GBN trace for full window (matches gbn.c condition at call time) */
+             if (TRACE > 0)
+               printf("----A: New message arrives, send window is full\n");
+             window_full++; /* Increment statistic even if buffered, to match GBN behavior when window is full at arrival */
+             if (TRACE > 3) /* Custom trace */
+             {
+               printf("----A: Packet window full, buffering message.\n");
+             }
+        }
+
 
         A_message_buffer[A_message_buffer_end] = message;
         A_message_buffer_end = (A_message_buffer_end + 1) % 1000;
@@ -204,8 +182,12 @@ void A_output(struct msg message)
 
     } else
     {
-        /* This block is for when the message buffer is full - very rare with size 1000 for 20 messages */
-        /* The GBN "window full" print is already handled above based on message buffer state. */
+        /* Message buffer is full - very rare with size 1000 for 20 messages */
+        /* In this rare case, we drop the message from Layer 5 and use the GBN window_full statistic. */
+        if (TRACE > 0) /* Original GBN trace for window full (triggered here if message buffer is full) */
+        {
+             printf("----A: New message arrives, send window is full\n");
+        }
         window_full++; /* Use the provided statistic for dropped messages */
          if (TRACE > 3) /* Custom trace */
          {
@@ -220,12 +202,13 @@ void A_output(struct msg message)
 */
 void A_input(struct pkt packet)
 {
-  int acked_seq;
-  int i;
-  int any_unacked; /* Use int for boolean */
+  /* Declare variables at the beginning for C90 compliance */
+  int any_unacked;
   int sent_packet_count;
-  int ack_offset;
-  int is_in_sent_range; /* Use int for boolean */
+  int is_in_sent_range;
+  int acked_seq;
+
+  acked_seq = packet.acknum; /* Moved assignment after declaration */
 
 
   /* if received ACK is not corrupted */
@@ -237,8 +220,6 @@ void A_input(struct pkt packet)
     }
     total_ACKs_received++;
 
-    acked_seq = packet.acknum;
-
     /* Check if the acknowledged packet's sequence number is within the logical range
        of sent but not yet acknowledged packets: [A_send_base, A_nextseqnum - 1].
        Use sequence number comparison that handles wrap-around.
@@ -246,12 +227,17 @@ void A_input(struct pkt packet)
        is less than the number of packets sent but not yet processed by A_input (which is A_nextseqnum - A_send_base).
     */
     sent_packet_count = (A_nextseqnum - A_send_base + SEQSPACE) % SEQSPACE;
-    ack_offset = (acked_seq - A_send_base + SEQSPACE) % SEQSPACE;
 
     is_in_sent_range = FALSE;
-    if (ack_offset < sent_packet_count)
-    {
-        is_in_sent_range = TRUE;
+    /* Check if the ACK sequence number is within the logical range of sent packets [A_send_base, A_nextseqnum - 1] */
+    if (sent_packet_count > 0) {
+         /* The acked sequence number must be between A_send_base and A_nextseqnum (exclusive, handling wrap-around) */
+         if (((acked_seq - A_send_base + SEQSPACE) % SEQSPACE < sent_packet_count) &&
+             ((acked_seq - A_nextseqnum + SEQSPACE) % SEQSPACE != 0) /* Exclude A_nextseqnum itself */
+            )
+         {
+              is_in_sent_range = TRUE;
+         }
     }
 
 
@@ -261,7 +247,17 @@ void A_input(struct pkt packet)
         {
           printf("----A: ACK %d is for a packet in the sent range\n", acked_seq);
         }
-        new_ACKs++;
+        new_ACKs++; /* Increment new_ACKs for any uncorrupted ACK within the sent range */
+
+        /* Add the GBN trace for "not a duplicate" ACK when it's a new ACK in GBN terms.
+           In SR, any uncorrupted ACK within the window is "processed". Let's match the GBN print
+           whenever a valid (uncorrupted, within sent range) ACK is received.
+        */
+         if (TRACE > 0) /* Original GBN trace for new ACK */
+         {
+           printf("----A: ACK %d is not a duplicate\n",packet.acknum);
+         }
+
 
         /* Mark the packet as acknowledged */
         A_packet_acked[acked_seq % SEQSPACE] = TRUE;
@@ -287,14 +283,21 @@ void A_input(struct pkt packet)
             any_unacked = FALSE;
              /* Check if there are any unacked packets in the window [A_send_base, A_nextseqnum - 1] */
              /* Iterate from the new A_send_base up to A_nextseqnum */
-            for(i = A_send_base; (i - A_nextseqnum + SEQSPACE) % SEQSPACE != 0; i++)
+            /* The loop condition needs to correctly represent iterating from A_send_base up to A_nextseqnum
+               handling wrap-around. */
             {
-                 if(A_packet_sent[i % SEQSPACE] == TRUE && A_packet_acked[i % SEQSPACE] == FALSE) /* Check if sent and NOT acknowledged */
+                 int current_check_seq = A_send_base; /* Declare inside block for C90 if needed, or move to top */
+                 while ((current_check_seq - A_nextseqnum + SEQSPACE) % SEQSPACE != 0)
                  {
-                     any_unacked = TRUE;
-                     break;
+                      if(A_packet_sent[current_check_seq % SEQSPACE] == TRUE && A_packet_acked[current_check_seq % SEQSPACE] == FALSE) /* Check if sent and NOT acknowledged */
+                      {
+                          any_unacked = TRUE;
+                          break;
+                      }
+                      current_check_seq++; /* Increment sequence number */
                  }
-             }
+            }
+
 
             if(any_unacked)
             {
@@ -318,7 +321,7 @@ void A_input(struct pkt packet)
 
     } else
     {
-         /* This is an ACK for a packet *outside* the logical sent range [A_send_base, A_nextseqnum - 1].
+         /* This is an uncorrupted ACK for a packet *outside* the logical sent range [A_send_base, A_nextseqnum - 1].
             If the ACK sequence number is less than A_send_base, it's an old duplicate ACK.
             If it's >= A_nextseqnum (accounting for wrap), it's an ACK for a future packet (shouldn't happen or discard).
             Given the trace requirement, let's print the GBN duplicate ACK message for any uncorrupted ACK outside the sent range.
@@ -334,10 +337,14 @@ void A_input(struct pkt packet)
 
     }
   } else
-  {
+  { /* Corrupted packet */
     if (TRACE > 0) /* Original GBN trace */
     {
-      printf ("----A: corrupted ACK is received, do nothing!\n");
+      printf ("----A: corrupted ACK is received, do nothing!\n"); /* GBN uses this for corrupted */
+    }
+    if (TRACE > 3) /* Custom trace */
+    {
+      printf ("----A: corrupted ACK is received, discarding\n");
     }
   }
 }
@@ -345,7 +352,9 @@ void A_input(struct pkt packet)
 /* called when A's timer goes off*/
 void A_timerinterrupt(void)
 {
-  int i;
+  /* Declare variables at the beginning for C90 compliance */
+  int any_unacked;
+  int current_check_seq;
   int current_seq;
 
   if (TRACE > 0) /* Original GBN trace */
@@ -355,30 +364,54 @@ void A_timerinterrupt(void)
 
   /* Restart the overall timer immediately */
   stoptimer(A); /* Stop the expired timer before restarting */
-  starttimer(A, RTT);
-  if (TRACE > 3) /* Custom trace */
-  {
-    printf("----A: Restarting timer for window base %d after timeout\n", A_send_base % SEQSPACE);
-  }
+  /* Only restart timer if there are still unacked packets in the window */
+  any_unacked = FALSE;
+  current_check_seq = A_send_base;
+   while ((current_check_seq - A_nextseqnum + SEQSPACE) % SEQSPACE != 0)
+   {
+        if(A_packet_sent[current_check_seq % SEQSPACE] == TRUE && A_packet_acked[current_check_seq % SEQSPACE] == FALSE) /* Check if sent and NOT acknowledged */
+        {
+            any_unacked = TRUE;
+            break;
+        }
+        current_check_seq++; /* Increment sequence number */
+   }
+
+   if (any_unacked)
+   {
+        starttimer(A, RTT);
+        if (TRACE > 3) /* Custom trace */
+        {
+          printf("----A: Restarting timer for window base %d after timeout\n", A_send_base % SEQSPACE);
+        }
+   } else {
+        if (TRACE > 3) /* Custom trace */
+        {
+          printf("----A: Timer interrupt, but no unacked packets in window. Timer not restarted.\n");
+        }
+   }
 
 
   /* Check for unacknowledged packets within the window [A_send_base, A_nextseqnum - 1] and resend them */
   /* Iterate from A_send_base up to A_nextseqnum */
-  for (i = A_send_base; (i - A_nextseqnum + SEQSPACE) % SEQSPACE != 0; i++)
+  /* The loop condition needs to correctly represent iterating from A_send_base up to A_nextseqnum
+     handling wrap-around. */
+  current_seq = A_send_base;
+  while ((current_seq - A_nextseqnum + SEQSPACE) % SEQSPACE != 0)
   {
-      current_seq = i % SEQSPACE;
       /* Use A_packet_sent to ensure we only resend packets that were actually sent */
-      if (A_packet_sent[current_seq] == TRUE && A_packet_acked[current_seq] == FALSE) /* Check if sent and NOT acknowledged */
+      if (A_packet_sent[current_seq % SEQSPACE] == TRUE && A_packet_acked[current_seq % SEQSPACE] == FALSE) /* Check if sent and NOT acknowledged */
       {
           if (TRACE > 0) /* Original GBN trace */
           {
-              printf ("---A: resending packet %d\n", A_packet_buffer[current_seq].seqnum);
+              printf ("---A: resending packet %d\n", A_packet_buffer[current_seq % SEQSPACE].seqnum);
           }
-          tolayer3(A, A_packet_buffer[current_seq]);
+          tolayer3(A, A_packet_buffer[current_seq % SEQSPACE]);
           packets_resent++;
           /* In a real SR implementation, you would restart the timer for this specific packet here.
              With this simulator, the single timer covers the window, so we just resend and the timer is already restarted above. */
       }
+      current_seq++; /* Increment sequence number */
   }
 }
 
@@ -415,6 +448,7 @@ static int B_packet_received_status[SEQSPACE]; /* To track status: 0=Not Receive
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(struct pkt packet)
 {
+  /* Declare variables at the beginning for C90 compliance */
   int i;
   int received_seq;
   int packet_offset_from_base;
@@ -491,6 +525,10 @@ void B_input(struct pkt packet)
             }
             tolayer5(B, packet.payload);
             B_packet_received_status[B_expectedseqnum % SEQSPACE] = 2; /* Mark as received and delivered */
+            B_packet_buffered[B_expectedseqnum % SEQSPACE] = FALSE; /* Also mark as not buffered after delivery */
+            /* Reset packet buffer entry after delivery if needed (optional but good practice) */
+            /* memset(&B_packet_buffer[B_expectedseqnum % SEQSPACE], 0, sizeof(struct pkt)); */
+
             B_expectedseqnum++;
 
             /* Deliver any buffered packets that are now in order */
@@ -533,7 +571,11 @@ void B_input(struct pkt packet)
     { /* Packet is outside the window (too old or too far ahead) */
         /* If the packet is too old but not corrupted (< B_expectedseqnum), it's an old duplicate.
            Resend ACK for such duplicates. */
-         if (received_seq < B_expectedseqnum)
+         packet_offset_from_base = (received_seq - B_expectedseqnum + SEQSPACE) % SEQSPACE; /* Recalculate offset for clarity outside window check */
+         /* A packet is "old" if its sequence number is less than B_expectedseqnum, handling wrap around. */
+         /* This is equivalent to checking if the sequence number is in the range [B_expectedseqnum - WINDOWSIZE, B_expectedseqnum - 1] modulo SEQSPACE. */
+         /* The offset from B_expectedseqnum will be a large positive number close to SEQSPACE. */
+         if (packet_offset_from_base >= (SEQSPACE - WINDOWSIZE) && packet_offset_from_base < SEQSPACE)
          {
              if (TRACE > 3) /* Custom trace */
              {
