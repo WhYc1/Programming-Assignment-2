@@ -142,7 +142,69 @@ void A_output(struct msg message)
 */
 void A_input(struct pkt packet)
 {
-    // Placeholder, will be implemented in next steps
+    int acked_seq;
+    int i;
+    bool any_unacked;
+
+    /* if received ACK is not corrupted */
+    if (!IsCorrupted(packet)) {
+        if (TRACE > 0)
+            printf("----A: uncorrupted ACK %d is received\n",packet.acknum);
+        total_ACKs_received++;
+
+        acked_seq = packet.acknum;
+
+        /* Check if the acknowledged packet is within the sender's window [A_send_base, A_nextseqnum - 1] */
+        /* Handle sequence number wrap-around */
+        if ( (acked_seq >= A_send_base && acked_seq < A_nextseqnum) ||
+             (A_send_base > A_nextseqnum && (acked_seq >= A_send_base || acked_seq < A_nextseqnum)) )
+        {
+            if (TRACE > 0)
+                printf("----A: ACK %d is for a packet in the window\n", acked_seq);
+            new_ACKs++;
+
+            /* Mark the packet as acknowledged */
+            A_packet_acked[acked_seq % SEQSPACE] = true;
+            /* Stop the timer for this specific packet if using per-packet timers.
+               With this simulator, we adjust the single timer based on window movement. */
+
+            /* Slide the window if the base packet has been acknowledged */
+            while (A_packet_acked[A_send_base % SEQSPACE] && A_send_base < A_nextseqnum) {
+                if (TRACE > 0)
+                    printf("----A: Packet %d acknowledged, sliding window\n", A_send_base);
+                A_packet_sent[A_send_base % SEQSPACE] = false; /* Reset sent status */
+                A_packet_acked[A_send_base % SEQSPACE] = false; /* Reset acked status for reuse */
+                A_send_base++;
+                /* Since the simulator only has one timer for entity A, stop it and restart if necessary */
+                stoptimer(A); /* Stop the current timer */
+                any_unacked = false;
+                /* Check if there are any unacked packets in the new window [A_send_base, A_nextseqnum - 1] */
+                for(i = A_send_base; i < A_nextseqnum; i++){
+                    if(A_packet_sent[i % SEQSPACE] && !A_packet_acked[i % SEQSPACE]){
+                        any_unacked = true;
+                        break;
+                    }
+                }
+                if(any_unacked){
+                    starttimer(A, RTT); /* Start the timer if there are still unacked packets */
+                } else {
+                    /* If no unacked packets, timer remains stopped */
+                    if (TRACE > 0)
+                         printf("----A: No unacked packets in window, timer remains stopped.\n");
+                }
+            }
+
+            /* After sliding the window, try to send more packets from the message buffer */
+            A_send_next_packet();
+
+        } else {
+            if (TRACE > 0)
+                printf ("----A: ACK %d is outside the window, do nothing!\n", acked_seq);
+        }
+    } else {
+        if (TRACE > 0)
+            printf ("----A: corrupted ACK is received, do nothing!\n");
+    }
 }
 
 /* called when A's timer goes off*/
