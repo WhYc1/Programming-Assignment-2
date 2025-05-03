@@ -71,46 +71,68 @@ static int A_send_base; /* Base of the sender window (sequence number) */
 static int A_nextseqnum; /* The next sequence number to be used by the sender */
 
 /* Helper function to send the next available packet from the message buffer */
-// void A_send_next_packet() is added later
-
-/* called from layer 5 (application layer), passed the message to be sent to other side*/
-void A_output(struct msg message)
-{
-    // Initial implementation based on GBN, will be modified later
+void A_send_next_packet() {
     struct pkt sendpkt;
     int i;
 
-    /* if not blocked waiting on ACK */
-    if ( /* Placeholder for SR window check */ 1 /* windowcount < WINDOWSIZE */ ) { // This check will be updated for SR
-        if (TRACE > 1)
-            printf("----A: New message arrives, send window is not full, send new messge to layer3!\n");
+    /* Check if there are messages in the buffer and space in the sender window */
+    while (A_message_buffer_count > 0 && A_nextseqnum < A_send_base + WINDOWSIZE) {
 
-        /* create packet */
-        sendpkt.seqnum = A_nextseqnum; // This will be updated later
-        sendpkt.acknum = NOTINUSE;
+        if (TRACE > 1)
+            printf("----A: Sending packet for buffered message with seq num %d\n", A_nextseqnum);
+
+        /* Create packet from the oldest buffered message */
+        sendpkt.seqnum = A_nextseqnum;
+        sendpkt.acknum = NOTINUSE; /* ACK field not used by sender data packets */
         for ( i=0; i<20 ; i++ )
-            sendpkt.payload[i] = message.data[i];
+            sendpkt.payload[i] = A_message_buffer[A_message_buffer_start].data[i];
         sendpkt.checksum = ComputeChecksum(sendpkt);
 
-        /* put packet in window buffer - SR buffers differently */
-        // buffer[windowlast] = sendpkt; // GBN buffer, will be updated
+        /* Put packet in packet buffer */
+        A_packet_buffer[A_nextseqnum % SEQSPACE] = sendpkt;
+        A_packet_sent[A_nextseqnum % SEQSPACE] = true;
+        A_packet_acked[A_nextseqnum % SEQSPACE] = false; /* Mark as not yet acknowledged */
 
-        /* send out packet */
+        /* Send out packet */
         if (TRACE > 0)
             printf("Sending packet %d to layer 3\n", sendpkt.seqnum);
         tolayer3 (A, sendpkt);
 
-        /* start timer if first packet in window - timer logic changes for SR */
-        // if (windowcount == 1) starttimer(A,RTT); // GBN timer, will be updated
+        /* Start timer if this is the first unacked packet in the window */
+        if (A_send_base == A_nextseqnum) { /* Check if this is the first packet in the current window */
+            starttimer(A, RTT);
+        }
 
-        /* get next sequence number, wrap back to 0 - This logic is mostly ok but needs adjustment with buffering */
-        A_nextseqnum = (A_nextseqnum + 1) % SEQSPACE; // This will be updated with buffering
+        /* Move to the next message in the buffer */
+        A_message_buffer_start = (A_message_buffer_start + 1) % 1000;
+        A_message_buffer_count--;
+
+        /* Get next sequence number */
+        A_nextseqnum++;
     }
-    /* if blocked,  window is full */
-    else {
+}
+
+
+/* called from layer 5 (application layer), passed the message to be sent to other side*/
+void A_output(struct msg message)
+{
+    /* Buffer the incoming message from Layer 5 */
+    if (A_message_buffer_count < 1000) { /* Check if message buffer is not full */
+        A_message_buffer[A_message_buffer_end] = message;
+        A_message_buffer_end = (A_message_buffer_end + 1) % 1000;
+        A_message_buffer_count++;
+
+        if (TRACE > 1)
+            printf("----A: Message buffered from layer 5. Buffer count: %d\n", A_message_buffer_count);
+
+        /* Try to send packets from the buffer if there is space in the window */
+        A_send_next_packet();
+
+    } else {
         if (TRACE > 0)
-            printf("----A: New message arrives, send window is full\n");
-        window_full++;
+            printf("----A: Message buffer is full, dropping message from layer 5\n");
+        /* This case should ideally not happen with a large buffer, but included for completeness */
+        window_full++; /* Use the provided statistic for dropped messages */
     }
 }
 
@@ -120,75 +142,13 @@ void A_output(struct msg message)
 */
 void A_input(struct pkt packet)
 {
-    // GBN implementation, will be completely replaced for SR
-    int ackcount = 0;
-    int i;
-
-    /* if received ACK is not corrupted */
-    if (!IsCorrupted(packet)) {
-        if (TRACE > 0)
-            printf("----A: uncorrupted ACK %d is received\n",packet.acknum);
-        total_ACKs_received++;
-
-        /* check if new ACK or duplicate */
-        // GBN ACK processing, will be replaced for SR
-        if ( /* Placeholder for SR ACK check */ 1 /* windowcount != 0 */) {
-             // int seqfirst = buffer[windowfirst].seqnum; // GBN buffer, will be updated
-             // int seqlast = buffer[windowlast].seqnum;   // GBN buffer, will be updated
-             /* check case when seqnum has and hasn't wrapped */
-             // if (((seqfirst <= seqlast) && (packet.acknum >= seqfirst && packet.acknum <= seqlast)) ||
-             //     ((seqfirst > seqlast) && (packet.acknum >= seqfirst || packet.acknum <= seqlast))) {
-
-                 /* packet is a new ACK */
-                 if (TRACE > 0)
-                     printf("----A: ACK %d is not a duplicate\n",packet.acknum);
-                 new_ACKs++;
-
-                 /* cumulative acknowledgement - determine how many packets are ACKed - GBN specific */
-                 // if (packet.acknum >= seqfirst) ackcount = packet.acknum + 1 - seqfirst;
-                 // else ackcount = SEQSPACE - seqfirst + packet.acknum;
-
-                 /* slide window by the number of packets ACKed - GBN specific */
-                 // windowfirst = (windowfirst + ackcount) % WINDOWSIZE;
-
-                 /* delete the acked packets from window buffer - GBN specific */
-                 // for (i=0; i<ackcount; i++) windowcount--;
-
-                 /* start timer again if there are still more unacked packets in window - GBN specific */
-                 stoptimer(A); // Timer logic will change for SR
-                 // if (windowcount > 0) starttimer(A, RTT);
-
-             // }
-         }
-        else
-            if (TRACE > 0)
-                printf ("----A: duplicate ACK received, do nothing!\n");
-    }
-    else
-        if (TRACE > 0)
-            printf ("----A: corrupted ACK is received, do nothing!\n");
+    // Placeholder, will be implemented in next steps
 }
 
 /* called when A's timer goes off*/
 void A_timerinterrupt(void)
 {
-    // GBN implementation, will be completely replaced for SR
-    int i;
-
-    if (TRACE > 0)
-        printf("----A: time out,resend packets!\n");
-
-    // GBN retransmission logic, will be replaced for SR
-    // for(i=0; i<windowcount; i++) {
-    //
-    //     if (TRACE > 0)
-    //         printf ("---A: resending packet %d\n", (buffer[(windowfirst+i) % WINDOWSIZE]).seqnum);
-    //
-    //     tolayer3(A,buffer[(windowfirst+i) % WINDOWSIZE]);
-    //     packets_resent++;
-    //     if (i==0) starttimer(A,RTT);
-    // }
-
+    // Placeholder, will be implemented in next steps
 }
 
 
@@ -197,33 +157,23 @@ void A_timerinterrupt(void)
 /* entity A routines are called. You can use it to do any initialization*/
 void A_init(void)
 {
-    // Initial GBN initialization, will be updated for SR
     int i;
     A_send_base = 0;
     A_nextseqnum = 0;
-    for(i = 0; i < SEQSPACE; i++){ // SEQSPACE is larger for SR
-        A_packet_sent[i] = false; // Added for SR
-        A_packet_acked[i] = false; // Added for SR
+    for(i = 0; i < SEQSPACE; i++){
+        A_packet_sent[i] = false;
+        A_packet_acked[i] = false;
     }
-    A_message_buffer_start = 0; // Added for SR
-    A_message_buffer_end = 0;   // Added for SR
-    A_message_buffer_count = 0; // Added for SR
-
-    /* initialise A's window, buffer and sequence number - GBN specific, some variables reused differently in SR */
-    // A_nextseqnum = 0;  /* A starts with seq num 0, do not change this */
-    // windowfirst = 0;
-    // windowlast = -1;   /* windowlast is where the last packet sent is stored.
-    // 		     new packets are placed in winlast + 1
-    // 		     so initially this is set to -1
-    // 		   */
-    // windowcount = 0;
+    A_message_buffer_start = 0;
+    A_message_buffer_end = 0;
+    A_message_buffer_count = 0;
 }
 
 
 
 /********* Receiver (B)  variables and procedures ************/
 
-static int B_expectedseqnum; /* the sequence number expected next by the receiver */
+static int B_expectedseqnum; /* The sequence number expected next by the receiver */
 // static int B_nextseqnum;   /* the sequence number for the next packets sent by B - not needed for simplex SR */
 
 static struct pkt B_packet_buffer[SEQSPACE]; /* Buffer for out-of-order packets - Added for SR */
@@ -233,62 +183,29 @@ static bool B_packet_buffered[SEQSPACE]; /* To track if a packet is buffered in 
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(struct pkt packet)
 {
-    // GBN implementation, will be completely replaced for SR
+    // Placeholder, will be implemented in next steps
     struct pkt sendpkt;
     int i;
 
-    /* if not corrupted and received packet is in order */
-    if  ( (!IsCorrupted(packet))  && (packet.seqnum == expectedseqnum) ) { // Sequence number check is GBN specific
-        if (TRACE > 0)
-            printf("----B: packet %d is correctly received, send ACK!\n",packet.seqnum);
-        packets_received++;
+    /* create ACK packet to send immediately */
+    sendpkt.seqnum = 0; /* Sender doesn't care about this for ACKs */
+    sendpkt.payload[0] = '0'; /* No data in ACK packet */
+    for(i=1; i<20; i++) sendpkt.payload[i] = '0'; /* Fill the rest with 0s */
 
-        /* deliver to receiving application */
-        tolayer5(B, packet.payload);
-
-        /* send an ACK for the received packet */
-        sendpkt.acknum = expectedseqnum; // GBN ACK logic, will be updated for SR
-
-        /* update state variables */
-        expectedseqnum = (expectedseqnum + 1) % SEQSPACE; // GBN state update, will be updated for SR
-    }
-    else {
-        /* packet is corrupted or out of order resend last ACK - GBN specific */
-        if (TRACE > 0)
-            printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
-        // if (expectedseqnum == 0) sendpkt.acknum = SEQSPACE - 1;
-        // else sendpkt.acknum = expectedseqnum - 1;
-        // ACK logic will be updated for SR
-    }
-
-    /* create packet - ACK packet creation is mostly fine but seqnum handling differs */
-    sendpkt.seqnum = 0; // B_nextseqnum; // Not needed for simplex SR data. Use 0 or NOTINUSE for ACKs.
-    // B_nextseqnum = (B_nextseqnum + 1) % 2; // Not needed for simplex SR
-
-    /* we don't have any data to send.  fill payload with 0's */
-    for ( i=0; i<20 ; i++ )
-        sendpkt.payload[i] = '0';
-
-    /* computer checksum */
-    sendpkt.checksum = ComputeChecksum(sendpkt);
-
-    /* send out packet */
-    tolayer3 (B, sendpkt);
+    // Rest of B_input logic will be implemented in next steps
 }
 
 /* the following routine will be called once (only) before any other */
-/* entity B routines are called. You can use it to do any initialization */
+/* entity B routines are called. You can use it to do any initialization*/
 void B_init(void)
 {
-    // Initial GBN initialization, will be updated for SR
+    // Placeholder, will be implemented in next steps
     int i;
-    B_expectedseqnum = 0; // This variable is used in SR
-    // B_nextseqnum = 1; // Not needed for simplex SR
-
-    for(i = 0; i < SEQSPACE; i++){ // SEQSPACE is larger for SR
-        B_packet_buffered[i] = false; // Added for SR
+    B_expectedseqnum = 0;
+    for(i = 0; i < SEQSPACE; i++){
+        B_packet_buffered[i] = false;
         // Initialize packet buffer entries (optional but good practice)
-        // memset(&B_packet_buffer[i], 0, sizeof(struct pkt)); // Added for SR, needs include <string.h>
+        // memset(&B_packet_buffer[i], 0, sizeof(struct pkt));
     }
 }
 
