@@ -189,7 +189,7 @@ void A_input(struct pkt packet)
                     starttimer(A, RTT); /* Start the timer if there are still unacked packets */
                 } else {
                     /* If no unacked packets, timer remains stopped */
-                    if (TRACE > 0)
+                     if (TRACE > 0)
                          printf("----A: No unacked packets in window, timer remains stopped.\n");
                 }
             }
@@ -210,7 +210,25 @@ void A_input(struct pkt packet)
 /* called when A's timer goes off*/
 void A_timerinterrupt(void)
 {
-    // Placeholder, will be implemented in next steps
+    int i;
+
+    if (TRACE > 0)
+        printf("----A: timer interrupt, checking for timeouts!\n");
+
+    starttimer(A, RTT); /* Restart the overall timer immediately */
+
+    /* Check for unacknowledged packets within the window [A_send_base, A_nextseqnum - 1] and resend them */
+    for (i = A_send_base; i < A_nextseqnum; i++) {
+        /* Use A_packet_sent to ensure we only resend packets that were actually sent */
+        if (A_packet_sent[i % SEQSPACE] && !A_packet_acked[i % SEQSPACE]) {
+            if (TRACE > 0)
+                printf ("---A: resending packet %d\n", A_packet_buffer[i % SEQSPACE].seqnum);
+            tolayer3(A, A_packet_buffer[i % SEQSPACE]);
+            packets_resent++;
+            /* In a real SR implementation, you would restart the timer for this specific packet here.
+               With this simulator, the single timer covers the window, so we just resend and the timer is already restarted above. */
+        }
+    }
 }
 
 
