@@ -279,13 +279,12 @@ void B_input(struct pkt packet)
 /* entity B routines are called. You can use it to do any initialization*/
 void B_init(void)
 {
-    // Placeholder, will be implemented in next steps
     int i;
     B_expectedseqnum = 0;
     for(i = 0; i < SEQSPACE; i++){
         B_packet_buffered[i] = false;
-        // Initialize packet buffer entries (optional but good practice)
-        // memset(&B_packet_buffer[i], 0, sizeof(struct pkt));
+        /* Initialize packet buffer entries (optional but good practice) */
+        /* memset(&B_packet_buffer[i], 0, sizeof(struct pkt)); */
     }
 }
 
