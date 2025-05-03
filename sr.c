@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <string.h> // Required for memcpy
+#include <string.h> 
 
 #include "emulator.h"
 #include "sr.h"
@@ -189,7 +189,7 @@ void A_input(struct pkt packet)
                     starttimer(A, RTT); /* Start the timer if there are still unacked packets */
                 } else {
                     /* If no unacked packets, timer remains stopped */
-                     if (TRACE > 0)
+                    if (TRACE > 0)
                          printf("----A: No unacked packets in window, timer remains stopped.\n");
                 }
             }
@@ -254,25 +254,102 @@ void A_init(void)
 /********* Receiver (B)  variables and procedures ************/
 
 static int B_expectedseqnum; /* The sequence number expected next by the receiver */
-// static int B_nextseqnum;   /* the sequence number for the next packets sent by B - not needed for simplex SR */
-
-static struct pkt B_packet_buffer[SEQSPACE]; /* Buffer for out-of-order packets - Added for SR */
-static bool B_packet_buffered[SEQSPACE]; /* To track if a packet is buffered in the receiver buffer - Added for SR */
+static struct pkt B_packet_buffer[SEQSPACE]; /* Buffer for out-of-order packets */
+static bool B_packet_buffered[SEQSPACE]; /* To track if a packet is buffered in the receiver buffer */
 
 
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(struct pkt packet)
 {
-    // Placeholder, will be implemented in next steps
     struct pkt sendpkt;
     int i;
+    int received_seq;
+    int window_end;
 
     /* create ACK packet to send immediately */
     sendpkt.seqnum = 0; /* Sender doesn't care about this for ACKs */
     sendpkt.payload[0] = '0'; /* No data in ACK packet */
     for(i=1; i<20; i++) sendpkt.payload[i] = '0'; /* Fill the rest with 0s */
 
-    // Rest of B_input logic will be implemented in next steps
+
+    if (!IsCorrupted(packet)) {
+        if (TRACE > 0)
+            printf("----B: uncorrupted packet %d received\n", packet.seqnum);
+        packets_received++;
+
+        received_seq = packet.seqnum;
+        window_end = (B_expectedseqnum + WINDOWSIZE);
+
+
+        /* Check if the received packet is within the receiver's window [B_expectedseqnum, B_expectedseqnum + WINDOWSIZE - 1] */
+        /* Handle sequence number wrap-around for window check */
+        if ( (B_expectedseqnum <= received_seq && received_seq < window_end) ||
+             (window_end > SEQSPACE && (received_seq >= B_expectedseqnum || received_seq < window_end % SEQSPACE)) )
+        {
+            if (TRACE > 0)
+                printf("----B: packet %d is within the window\n", received_seq);
+
+            /* Send an ACK for the received packet */
+            sendpkt.acknum = received_seq;
+            sendpkt.checksum = ComputeChecksum(sendpkt);
+            tolayer3(B, sendpkt);
+            if (TRACE > 0)
+                printf("----B: sending ACK for packet %d\n", received_seq);
+
+
+            /* If the packet is the expected one, deliver it and any buffered in-order packets */
+            if (received_seq == B_expectedseqnum) {
+                if (TRACE > 0)
+                    printf("----B: packet %d is the expected one, delivering\n", received_seq);
+                tolayer5(B, packet.payload);
+                B_expectedseqnum++;
+
+                /* Deliver any buffered packets that are now in order */
+                while(B_packet_buffered[B_expectedseqnum % SEQSPACE]){
+                    if (TRACE > 0)
+                        printf("----B: delivering buffered packet %d\n", B_expectedseqnum);
+                    tolayer5(B, B_packet_buffer[B_expectedseqnum % SEQSPACE].payload);
+                    B_packet_buffered[B_expectedseqnum % SEQSPACE] = false; /* Mark as delivered */
+                    /* Reset packet buffer entry after delivery if needed (optional but good practice) */
+                    /* memset(&B_packet_buffer[B_expectedseqnum % SEQSPACE], 0, sizeof(struct pkt)); */
+                    B_expectedseqnum++;
+                }
+
+            } else { /* If the packet is out of order but within the window and not already buffered, buffer it */
+                if (!B_packet_buffered[received_seq % SEQSPACE]) {
+                    if (TRACE > 0)
+                        printf("----B: packet %d is out of order, buffering\n", received_seq);
+                    B_packet_buffer[received_seq % SEQSPACE] = packet; /* Buffer the packet */
+                    B_packet_buffered[received_seq % SEQSPACE] = true; /* Mark as buffered */
+                } else {
+                    if (TRACE > 0)
+                        printf("----B: packet %d already buffered\n", received_seq);
+                }
+            }
+
+        } else { /* Packet is outside the window (too old or too far ahead) */
+            /* If the packet is too old but not corrupted, it's a duplicate outside the window.
+               Resend ACK for such duplicates as per some SR implementations (though not strictly necessary for correctness if receiver window is handled correctly).
+               Let's resend ACK if it's an uncorrupted packet with sequence number less than B_expectedseqnum. */
+            if (received_seq < B_expectedseqnum) {
+                 if (TRACE > 0)
+                    printf("----B: old duplicate packet %d received, resending ACK\n", received_seq);
+                sendpkt.acknum = received_seq;
+                sendpkt.checksum = ComputeChecksum(sendpkt);
+                tolayer3(B, sendpkt);
+                if (TRACE > 0)
+                    printf("----B: sending ACK for packet %d\n", received_seq);
+            } else {
+                 if (TRACE > 0)
+                    printf("----B: packet %d is too far ahead or outside the window, discarding\n", received_seq);
+            }
+
+        }
+    } else {
+        if (TRACE > 0)
+            printf ("----B: corrupted packet received, do nothing!\n");
+        /* Corrupted packet, do nothing (receiver waits for retransmission) */
+    }
 }
 
 /* the following routine will be called once (only) before any other */
