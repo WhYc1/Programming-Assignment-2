@@ -114,7 +114,6 @@ void A_output(struct msg message) {
 */
 void A_input(struct pkt packet) {
     int i;
-    bool ack_in_window = false;
     int ackidx = -1; /* Index in the buffer */
     int current_idx;
 
@@ -131,47 +130,39 @@ void A_input(struct pkt packet) {
             for (i = 0; i < windowcount; ++i) {
                 current_idx = (windowfirst + i) % WINDOWSIZE;
                 if (buffer[current_idx].seqnum == packet.acknum) {
-                    ack_in_window = true;
                     ackidx = current_idx; /* Found index */
                     break;
                 }
             }
 
-            if (ack_in_window) {
-                /* Check if we haven't already processed an ACK for this packet */
-                if (A_status[ackidx] == AS_SENT) {
+            /* Check if we haven't already processed an ACK for this packet */
+            if (A_status[ackidx] == AS_SENT) {
 
-                    if (TRACE > 0)
-                        printf("----A: ACK %d is not a duplicate\n", packet.acknum); /* Keep original print */
-                    new_ACKs++;
+                if (TRACE > 0) printf("----A: ACK %d is not a duplicate\n", packet.acknum);
+                new_ACKs++;
 
-                    /* Mark packet as received and stop its logical timer */
-                    A_status[ackidx] = AS_RCVD;
+                /* Mark packet as received and stop its logical timer */
+                A_status[ackidx] = AS_RCVD;
 
-                    /* Slide the window base (windowfirst) past all contiguously acknowledged */
-                    /* packets */
-                    while (windowcount > 0 && A_status[windowfirst] == AS_RCVD) {
-                        A_status[windowfirst] = AS_NONE; /* Reset status for the buffer slot */
-                        windowfirst = (windowfirst + 1) % WINDOWSIZE;
-                        windowcount--;
-                    }
-
-                    /* Restart the single physical timer based on remaining packets */
-                    stoptimer(A);
-                    if (windowcount > 0) { starttimer(A, RTT); }
-
-                } else {
-                    /* Received ACK for a packet already marked as RCVD (or somehow not SENT). */
-                    /* This can happen if ACKs are duplicated by the network. */
-                    if (TRACE > 0) printf("----A: duplicate ACK received, do nothing!\n"); /* Keep original print */
+                /* Slide the window base (windowfirst) past all contiguously acknowledged */
+                /* packets */
+                while (windowcount > 0 && A_status[windowfirst] == AS_RCVD) {
+                    A_status[windowfirst] = AS_NONE; /* Reset status for the buffer slot */
+                    windowfirst = (windowfirst + 1) % WINDOWSIZE;
+                    windowcount--;
                 }
+
+                /* Restart the single physical timer based on remaining packets */
+                stoptimer(A);
+                if (windowcount > 0) { starttimer(A, RTT); }
+
             } else {
-                /* Could be an ACK for a packet already slid past, or an invalid ACK#. */
-                if (TRACE > 0) printf("----A: duplicate ACK received, do nothing!\n"); /* Keep original print */
+                /* Received ACK for a packet already marked as RCVD (or somehow not SENT). */
+                /* This can happen if ACKs are duplicated by the network. */
+                if (TRACE > 0) printf("----A: duplicate ACK received, do nothing!\n");
             }
         } else {
-            /* Window is empty, any ACK received is technically a duplicate or old. */
-            if (TRACE > 0) printf("----A: duplicate ACK received, do nothing!\n"); /* Keep original print */
+            if (TRACE > 0) printf("----A: duplicate ACK received, do nothing!\n");
         }
     } else {
         /* Corrupted ACK - Keep original print */
