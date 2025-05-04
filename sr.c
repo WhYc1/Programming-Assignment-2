@@ -184,11 +184,11 @@ void A_timerinterrupt(void) {
     int k;
     int idx;
     bool resent_any = false;
-    double epsilon = 0.0001;
 
     /* Identify the first packet whose timers have effectively expired */
     for (k = 0; k < windowcount; k++) {
         idx = (windowfirst + k) % WINDOWSIZE;
+        if (k == 0) starttimer(A, RTT);
         if (k < windowcount && A_status[idx] == AS_SENT) {
 
             /* Check if this packet's timer expired */
@@ -201,8 +201,8 @@ void A_timerinterrupt(void) {
 
             tolayer3(A, buffer[idx]);
             packets_resent++;
+            break;
         }
-        if (k == 0) starttimer(A, RTT);
     }
 }
 
