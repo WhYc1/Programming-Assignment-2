@@ -1,0 +1,40 @@
+# .clang-format configuration file
+# Goal: Compact code style with 4-space indentation.
+
+# Based on Google Style, but modified for compactness and specific requirements.
+
+# --- Indentation ---
+IndentWidth: 4
+UseTab: Never
+TabWidth: 4
+SortIncludes: false
+
+# --- Compactness Settings ---
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Always
+AllowShortLoopsOnASingleLine: true
+
+BinPackArguments: true
+BinPackParameters: true
+
+BreakBeforeBraces: Attach
+CompactNamespaces: true
+
+# --- Spacing ---
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpacesInAngles: false
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+
+# --- Line Breaking & Wrapping ---
+ColumnLimit: 100
+
+
+# --- Other Style Preferences (Optional, adjust as needed) ---
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+PointerAlignment: Right
+
