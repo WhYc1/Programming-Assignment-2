@@ -188,7 +188,6 @@ void A_timerinterrupt(void) {
     /* Identify the first packet whose timers have effectively expired */
     for (k = 0; k < windowcount; k++) {
         idx = (windowfirst + k) % WINDOWSIZE;
-        if (k == 0) starttimer(A, RTT);
         if (k < windowcount && A_status[idx] == AS_SENT) {
 
             /* Check if this packet's timer expired */
@@ -201,8 +200,9 @@ void A_timerinterrupt(void) {
 
             tolayer3(A, buffer[idx]);
             packets_resent++;
-            break;
         }
+        if (k == 0) starttimer(A, RTT);
+        if (resent_any) break;
     }
 }
 
@@ -241,97 +241,55 @@ void B_input(struct pkt packet) {
     struct pkt sendpkt;
     int i;
     int rcv_base;
-    int seq_max_in_window;
-    int seq_min_past_window;
-    int seq_max_past_window;
-    bool in_receive_window = false;
-    bool in_past_window = false;
     int off;
     int idx;
 
     /* Calculate window boundaries */
     rcv_base = expectedseqnum;
-    seq_max_in_window = (rcv_base + WINDOWSIZE - 1) % SEQSPACE;          /* Inclusive */
-    seq_min_past_window = (rcv_base - WINDOWSIZE + SEQSPACE) % SEQSPACE; /* Inclusive */
-    seq_max_past_window = (rcv_base - 1 + SEQSPACE) % SEQSPACE;          /* Inclusive */
-
-    /* Determine if packet is within the valid receive window or the past window */
-    if (WINDOWSIZE > 0) {
-        if (((rcv_base + WINDOWSIZE - 1) % SEQSPACE) >= rcv_base) { /* No wrap-around for main window */
-            if (packet.seqnum >= rcv_base && packet.seqnum <= seq_max_in_window) { in_receive_window = true; }
-        } else { /* Main window wraps around */
-            if (packet.seqnum >= rcv_base || packet.seqnum <= seq_max_in_window) { in_receive_window = true; }
-        }
-    }
-
-    if (WINDOWSIZE > 0 && !in_receive_window) { /* Only check past if not in main window */
-        if (rcv_base == seq_min_past_window) {
-            /* If rcv_base wraps fully, past window overlaps/doesn't exist distinctly */
-            in_past_window = false;
-        } else if (((rcv_base - 1 + SEQSPACE) % SEQSPACE) >= seq_min_past_window) { /* No wrap-around for past window */
-            if (packet.seqnum >= seq_min_past_window && packet.seqnum <= seq_max_past_window) { in_past_window = true; }
-        } else { /* Past window wraps around */
-            if (packet.seqnum >= seq_min_past_window || packet.seqnum <= seq_max_past_window) { in_past_window = true; }
-        }
-    }
 
     /* Process based on window check and corruption status */
     if (!IsCorrupted(packet)) {
-        if (in_receive_window) {
-            /* Packet is within the expected receive window [rcv_base, rcv_base+N-1] */
-            if (TRACE > 0) printf("----B: packet %d is correctly received, send ACK!\n", packet.seqnum);
+        /* Packet is within the expected receive window [rcv_base, rcv_base+N-1] */
+        if (TRACE > 0) printf("----B: packet %d is correctly received, send ACK!\n", packet.seqnum);
 
-            /* --- Send ACK for the specific packet received --- */
-            sendpkt.acknum = packet.seqnum;
-            sendpkt.seqnum = B_nextseqnum;                /* B's seqnum for ACK (optional) */
-            B_nextseqnum = (B_nextseqnum + 1) % SEQSPACE; /* Needs own space if B sends data */
+        /* --- Send ACK for the specific packet received --- */
+        sendpkt.acknum = packet.seqnum;
 
-            for (i = 0; i < 20; i++) sendpkt.payload[i] = '0'; /* No data payload in ACK */
-            sendpkt.checksum = ComputeChecksum(sendpkt);
+        /* --- Buffer the packet if it hasn't been received before --- */
+        off = (packet.seqnum - rcv_base + SEQSPACE) % SEQSPACE;
+        idx = (B_windowfirst + off) % WINDOWSIZE;
 
-            /* --- Buffer the packet if it hasn't been received before --- */
-            off = (packet.seqnum - rcv_base + SEQSPACE) % SEQSPACE;
-            idx = (B_windowfirst + off) % WINDOWSIZE;
+        if (B_status[idx] == BS_NONE) {
+            B_buffer[idx] = packet;
+            B_status[idx] = BS_RECEIVED; /* Mark as received */
 
-            if (B_status[idx] == BS_NONE) {
-                B_buffer[idx] = packet;
-                B_status[idx] = BS_RECEIVED; /* Mark as received */
+            /* --- Try to deliver contiguous packets starting from rcv_base --- */
+            while (B_status[B_windowfirst] == BS_RECEIVED) {
+                tolayer5(B, B_buffer[B_windowfirst].payload);
+                packets_received++; /* Increment count *only* when delivered */
 
-                /* --- Try to deliver contiguous packets starting from rcv_base --- */
-                while (B_status[B_windowfirst] == BS_RECEIVED) {
-                    tolayer5(B, B_buffer[B_windowfirst].payload);
-                    packets_received++; /* Increment count *only* when delivered */
-
-                    /* Advance window: clear buffer slot, move windowfirst index, increment expectedseqnum */
-                    B_status[B_windowfirst] = BS_NONE;
-                    B_windowfirst = (B_windowfirst + 1) % WINDOWSIZE;
-                    expectedseqnum = (expectedseqnum + 1) % SEQSPACE; /* CRITICAL: Update expected base */
-                }
+                /* Advance window: clear buffer slot, move windowfirst index, increment expectedseqnum */
+                B_status[B_windowfirst] = BS_NONE;
+                B_windowfirst = (B_windowfirst + 1) % WINDOWSIZE;
+                expectedseqnum = (expectedseqnum + 1) % SEQSPACE; /* CRITICAL: Update expected base */
             }
-
-            tolayer3(B, sendpkt); /* Send the ACK */
-
-        } else if (in_past_window) {
-            /* Packet is within the 'past' window */
-            if (TRACE > 0) printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
-
-            /* --- Resend ACK for the specific packet received --- */
-            sendpkt.acknum = packet.seqnum;
-            sendpkt.seqnum = B_nextseqnum;
-            for (i = 0; i < 20; i++) sendpkt.payload[i] = '0';
-            sendpkt.checksum = ComputeChecksum(sendpkt);
-            tolayer3(B, sendpkt); /* Resend the ACK */
-
-        } else {
-            if (TRACE > 0) printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
-            return;
         }
+
+        tolayer3(B, sendpkt); /* Send the ACK */
 
     } else {
         /* Packet is corrupted. Discard silently. */
         if (TRACE > 0) printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
-        return;
+        if (expectedseqnum == 0) sendpkt.acknum = SEQSPACE - 1;
+        else
+            sendpkt.acknum = expectedseqnum - 1;
     }
+
+    for (i = 0; i < 20; i++) sendpkt.payload[i] = '0'; /* No data payload in ACK */
+    sendpkt.checksum = ComputeChecksum(sendpkt);
+    sendpkt.seqnum = B_nextseqnum;
+    B_nextseqnum = (B_nextseqnum + 1) % SEQSPACE;
+    tolayer3(B, sendpkt);
 }
 
 /* the following routine will be called once (only) before any other */
