@@ -116,8 +116,10 @@ void A_output(struct msg message) {
         if (TRACE > 0) printf("Sending packet %d to layer 3\n", sendpkt.seqnum);
         tolayer3(A, sendpkt);
 
-        /* Update the single physical timer */
-        A_start_physical_timer(); /* Restart with the earliest expiration time */
+        /* Start timer only if it's the first packet in the window */
+        if (windowcount == 1) {
+            A_start_physical_timer();
+        }
 
         /* get next sequence number, wrap back to 0 */
         A_nextseqnum = (A_nextseqnum + 1) % SEQSPACE;
