@@ -253,6 +253,7 @@ void B_input(struct pkt packet) {
         if (TRACE > 0) printf("----B: packet %d is correctly received, send ACK!\n", packet.seqnum);
 
         /* --- Send ACK for the specific packet received --- */
+        packets_received++;
         sendpkt.acknum = packet.seqnum;
 
         /* --- Buffer the packet if it hasn't been received before --- */
@@ -266,7 +267,6 @@ void B_input(struct pkt packet) {
             /* --- Try to deliver contiguous packets starting from rcv_base --- */
             while (B_status[B_windowfirst] == BS_RECEIVED) {
                 tolayer5(B, B_buffer[B_windowfirst].payload);
-                packets_received++; /* Increment count *only* when delivered */
 
                 /* Advance window: clear buffer slot, move windowfirst index, increment expectedseqnum */
                 B_status[B_windowfirst] = BS_NONE;
