@@ -267,10 +267,7 @@ void B_input(struct pkt packet) {
         }
     } else {
         /* Packet is corrupted. Discard silently. */
-        if (TRACE > 0) printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
-        if (expectedseqnum == 0) sendpkt.acknum = SEQSPACE - 1;
-        else
-            sendpkt.acknum = expectedseqnum - 1;
+        return;
     }
 
     for (i = 0; i < 20; i++) sendpkt.payload[i] = '0'; /* No data payload in ACK */
