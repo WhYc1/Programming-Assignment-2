@@ -274,9 +274,6 @@ void B_input(struct pkt packet) {
                 expectedseqnum = (expectedseqnum + 1) % SEQSPACE; /* CRITICAL: Update expected base */
             }
         }
-
-        tolayer3(B, sendpkt); /* Send the ACK */
-
     } else {
         /* Packet is corrupted. Discard silently. */
         if (TRACE > 0) printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
