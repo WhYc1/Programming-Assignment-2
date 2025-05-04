@@ -117,7 +117,6 @@ void A_output(struct msg message) {
         tolayer3(A, sendpkt);
 
         /* Update the single physical timer */
-        stoptimer(A);             /* Stop current timer (if any) */
         A_start_physical_timer(); /* Restart with the earliest expiration time */
 
         /* get next sequence number, wrap back to 0 */
