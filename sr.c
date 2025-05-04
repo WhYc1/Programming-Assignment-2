@@ -286,8 +286,8 @@ void B_input(struct pkt packet) {
     }
 
     for (i = 0; i < 20; i++) sendpkt.payload[i] = '0'; /* No data payload in ACK */
-    sendpkt.checksum = ComputeChecksum(sendpkt);
     sendpkt.seqnum = B_nextseqnum;
+    sendpkt.checksum = ComputeChecksum(sendpkt);
     B_nextseqnum = (B_nextseqnum + 1) % SEQSPACE;
     tolayer3(B, sendpkt);
 }
