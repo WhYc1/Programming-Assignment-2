@@ -5,7 +5,7 @@
 #include "gbn.h"
 
 /* ******************************************************************
-   Go Back N protocol.  Adapted from J.F.Kurose
+   Selective Repeat Protocol.  Adapted from J.F.Kurose
    ALTERNATING BIT AND GO-BACK-N NETWORK EMULATOR: VERSION 1.2
 
    Network properties:
@@ -24,10 +24,25 @@
 
 #define RTT 16.0 /* round trip time.  MUST BE SET TO 16.0 when submitting assignment */
 #define WINDOWSIZE                                                                                 \
-    6                 /* the maximum number of buffered unacked packet                             \
-                        MUST BE SET TO 6 when submitting assignment */
-#define SEQSPACE 7    /* the min sequence space for GBN must be at least windowsize + 1 */
+    6 /* the maximum number of buffered unacked packet                                             \
+        MUST BE SET TO 6 when submitting assignment */
+#define SEQSPACE                                                                                   \
+    2 * WINDOWSIZE    /* the min sequence space for GBN must be at least windowsize + 1            \
+                       */
 #define NOTINUSE (-1) /* used to fill header fields that are not being used */
+#define min(a, b)                                                                                  \
+    ({                                                                                             \
+        typeof(a) _a = (a);                                                                        \
+        typeof(b) _b = (b);                                                                        \
+        _a < _b ? _a : _b;                                                                         \
+    })
+
+#define max(a, b)                                                                                  \
+    ({                                                                                             \
+        typeof(a) _a = (a);                                                                        \
+        typeof(b) _b = (b);                                                                        \
+        _a > _b ? _a : _b;                                                                         \
+    })
 
 /* generic procedure to compute the checksum of a packet.  Used by both sender and receiver
    the simulator will overwrite part of your packet with 'z's.  It will not overwrite your
@@ -57,6 +72,12 @@ static struct pkt buffer[WINDOWSIZE]; /* array for storing packets waiting for A
 static int windowfirst, windowlast;   /* array indexes of the first/last packet awaiting ACK */
 static int windowcount;               /* the number of packets currently awaiting an ACK */
 static int A_nextseqnum;              /* the next sequence number to be used by the sender */
+static int A_status[WINDOWSIZE];
+static double A_timers[WINDOWSIZE];
+
+#define AS_NONE 0
+#define AS_SENT 1
+#define AS_RCVD 2
 
 /* called from layer 5 (application layer), passed the message to be sent to other side */
 void A_output(struct msg message) {
@@ -79,6 +100,8 @@ void A_output(struct msg message) {
         /* windowlast will always be 0 for alternating bit; but not for GoBackN */
         windowlast = (windowlast + 1) % WINDOWSIZE;
         buffer[windowlast] = sendpkt;
+        A_status[windowlast] = AS_SENT;
+        A_timers[windowlast] = RTT;
         windowcount++;
 
         /* send out packet */
@@ -86,7 +109,23 @@ void A_output(struct msg message) {
         tolayer3(A, sendpkt);
 
         /* start timer if first packet in window */
-        if (windowcount == 1) starttimer(A, RTT);
+        stoptimer(A);
+        double min_timer_val = -1.0;
+        // Find the minimum remaining timer value among all AS_SENT packets
+        for (int j = 0; j < WINDOWSIZE; j++) { // Iterate through physical buffer slots
+            // Correctly calculate the logical index within the window
+            int current_buf_idx = (windowfirst + j) % WINDOWSIZE;
+            // Check only valid packets logically within the window count
+            if (j < windowcount && A_status[current_buf_idx] == AS_SENT) {
+                if (min_timer_val < 0 || A_timers[current_buf_idx] < min_timer_val) {
+                    min_timer_val = A_timers[current_buf_idx];
+                }
+            }
+        }
+
+        if (min_timer_val >= 0) {         // If there are packets awaiting ACKs
+            starttimer(A, min_timer_val); // Start timer for the earliest expiration time
+        }
 
         /* get next sequence number, wrap back to 0 */
         A_nextseqnum = (A_nextseqnum + 1) % SEQSPACE;
@@ -104,6 +143,8 @@ void A_output(struct msg message) {
 void A_input(struct pkt packet) {
     int ackcount = 0;
     int i;
+    int ackidx = 0;
+    int off;
 
     /* if received ACK is not corrupted */
     if (!IsCorrupted(packet)) {
@@ -124,19 +165,21 @@ void A_input(struct pkt packet) {
                 new_ACKs++;
 
                 /* cumulative acknowledgement - determine how many packets are ACKed */
-                if (packet.acknum >= seqfirst) ackcount = packet.acknum + 1 - seqfirst;
-                else
-                    ackcount = SEQSPACE - seqfirst + packet.acknum;
+                // seletive repeat does not support culmative acknowledgement
 
-                /* slide window by the number of packets ACKed */
-                windowfirst = (windowfirst + ackcount) % WINDOWSIZE;
+                off = (packet.acknum - seqfirst + SEQSPACE) % SEQSPACE;
+                ackidx = (windowfirst + off) % WINDOWSIZE;
 
-                /* delete the acked packets from window buffer */
-                for (i = 0; i < ackcount; i++) windowcount--;
+                A_status[ackidx] = AS_RCVD;
 
-                /* start timer again if there are still more unacked packets in window */
-                stoptimer(A);
-                if (windowcount > 0) starttimer(A, RTT);
+                while (ackidx == windowfirst && A_status[ackidx] == AS_RCVD) {
+                    ackidx = (ackidx + 1) % WINDOWSIZE;
+                    windowfirst = (windowfirst + 1) % WINDOWSIZE;
+                    A_status[ackidx] = AS_NONE;
+                    A_timers[ackidx] = -1;
+                    windowcount--;
+                    windowfirst++;
+                }
             }
         } else if (TRACE > 0)
             printf("----A: duplicate ACK received, do nothing!\n");
@@ -146,19 +189,53 @@ void A_input(struct pkt packet) {
 
 /* called when A's timer goes off */
 void A_timerinterrupt(void) {
-    int i;
 
-    if (TRACE > 0) printf("----A: time out,resend packets!\n");
+    bool timeout = false;
 
-    for (i = 0; i < windowcount; i++) {
-
-        if (TRACE > 0)
-            printf("---A: resending packet %d\n", (buffer[(windowfirst + i) % WINDOWSIZE]).seqnum);
-
-        tolayer3(A, buffer[(windowfirst + i) % WINDOWSIZE]);
-        packets_resent++;
-        if (i == 0) starttimer(A, RTT);
+    // determine the amount of elapsed time
+    int elapse = -1;
+    for (int j = 0; j < windowcount; j++) {
+        int idx = (windowfirst + j) % WINDOWSIZE;
+        if (A_status[idx] == AS_SENT) {
+            if (elapse == -1) elapse = A_timers[idx];
+            else
+                elapse = min(elapse, A_timers[idx]);
+        }
     }
+
+    // decrease all other timers
+    for (int j = 0; j < windowcount; j++) {
+        int idx = (windowfirst + j) % WINDOWSIZE;
+        if (A_status[idx] == AS_SENT) A_timers[idx] -= elapse;
+    }
+
+    // process timeouts
+    for (int j = 0; j < windowcount; j++) {
+        int idx = (windowfirst + j) % WINDOWSIZE;
+        if (A_status[idx] == AS_SENT && A_timers[idx] == 0) {
+            if (timeout == false) {
+                if (TRACE > 0) printf("----A: time out,resend packets!\n");
+                timeout = true;
+            }
+            if (TRACE > 0) printf("---A: resending packet %d\n", (buffer[idx]).seqnum);
+            packets_resent++;
+            A_timers[idx] = RTT;
+            tolayer3(A, buffer[idx]);
+        }
+    }
+
+    // reschedule timer
+    elapse = -1;
+    for (int i = 0; i < windowcount; i++) {
+        int idx = (windowfirst + i) % WINDOWSIZE;
+        if (A_status[idx] == AS_SENT) {
+            if (elapse == -1) elapse = A_timers[idx];
+            else
+                elapse = min(elapse, A_timers[idx]);
+        }
+    }
+
+    if (elapse != -1) starttimer(A, elapse);
 }
 
 /* the following routine will be called once (only) before any other */
@@ -172,12 +249,23 @@ void A_init(void) {
              so initially this is set to -1
            */
     windowcount = 0;
+    for (int i = 0; i < WINDOWSIZE; i++) A_timers[i] = -1;
+    for (int i = 0; i < WINDOWSIZE; i++) A_status[i] = AS_NONE;
 }
 
 /********* Receiver (B)  variables and procedures ************/
 
 static int expectedseqnum; /* the sequence number expected next by the receiver */
 static int B_nextseqnum;   /* the sequence number for the next packets sent by B */
+static struct pkt B_buffer[WINDOWSIZE];
+static int B_windowfirst;
+static int B_windowlast;
+static int B_windowcount;
+static int B_status[WINDOWSIZE];
+
+#define BS_NONE 0
+#define BS_WAITING 1
+#define BS_ACKED 2
 
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(struct pkt packet) {
@@ -185,7 +273,14 @@ void B_input(struct pkt packet) {
     int i;
 
     /* if not corrupted and received packet is in order */
-    if ((!IsCorrupted(packet)) && (packet.seqnum == expectedseqnum)) {
+    if ((!IsCorrupted(packet)) &&
+        ((B_windowcount == 0) ||
+         (expectedseqnum + WINDOWSIZE >= SEQSPACE
+              ? (packet.seqnum >= expectedseqnum ||
+                 packet.seqnum < (expectedseqnum + WINDOWSIZE) % SEQSPACE)
+              : (packet.seqnum >= expectedseqnum && packet.seqnum < (expectedseqnum + WINDOWSIZE))))
+
+    ) {
         if (TRACE > 0) printf("----B: packet %d is correctly received, send ACK!\n", packet.seqnum);
         packets_received++;
 
@@ -193,10 +288,37 @@ void B_input(struct pkt packet) {
         tolayer5(B, packet.payload);
 
         /* send an ACK for the received packet */
-        sendpkt.acknum = expectedseqnum;
+        sendpkt.acknum = packet.seqnum;
 
-        /* update state variables */
-        expectedseqnum = (expectedseqnum + 1) % SEQSPACE;
+        if (windowcount == 0) {
+            expectedseqnum = (sendpkt.seqnum + 1) % SEQSPACE;
+        } else {
+            int off = (packet.seqnum - expectedseqnum + SEQSPACE) % SEQSPACE;
+
+            for (int i = 0; i < off; i++) {
+                int idx = (B_windowfirst + off) % WINDOWSIZE;
+                if (B_status[idx] != BS_ACKED) B_status[idx] = BS_WAITING;
+            }
+
+            B_windowcount = max(B_windowcount, off + 1);
+
+            int idx = (B_windowfirst + off) % WINDOWSIZE;
+            B_buffer[idx] = packet;
+            B_status[idx] = BS_ACKED;
+
+            // process packets reordering
+            for (int i = 0; i < B_windowcount; i++) {
+                int idx = (B_windowfirst + i) % WINDOWSIZE;
+                if (B_status[idx] == BS_ACKED) {
+                    B_windowcount--;
+                    B_status[idx] = BS_NONE;
+                    B_windowfirst = (B_windowfirst + 1) % WINDOWSIZE;
+                    expectedseqnum = (B_buffer[idx].seqnum + 1) % SEQSPACE;
+                } else {
+                    break;
+                }
+            }
+        }
     } else {
         /* packet is corrupted or out of order resend last ACK */
         if (TRACE > 0)
@@ -208,7 +330,7 @@ void B_input(struct pkt packet) {
 
     /* create packet */
     sendpkt.seqnum = B_nextseqnum;
-    B_nextseqnum = (B_nextseqnum + 1) % 2;
+    B_nextseqnum = (B_nextseqnum + 1) % SEQSPACE;
 
     /* we don't have any data to send.  fill payload with 0's */
     for (i = 0; i < 20; i++) sendpkt.payload[i] = '0';
@@ -225,6 +347,10 @@ void B_input(struct pkt packet) {
 void B_init(void) {
     expectedseqnum = 0;
     B_nextseqnum = 1;
+    B_windowfirst = 0;
+    B_windowlast = -1;
+    B_windowcount = 0;
+    for (int i = 0; i < WINDOWSIZE; i++) { B_status[i] = BS_NONE; }
 }
 
 /******************************************************************************
