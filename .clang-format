@@ -30,7 +30,7 @@ SpaceAfterCStyleCast: false
 SpaceBeforeParens: ControlStatements
 
 # --- Line Breaking & Wrapping ---
-ColumnLimit: 100
+ColumnLimit: 120
 
 
 # --- Other Style Preferences (Optional, adjust as needed) ---
