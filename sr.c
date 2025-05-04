@@ -149,15 +149,20 @@ void A_output(struct msg message)
        is full and a packet is sent. We adapt the trace messages for SR buffering.
     */
 
-    /* Always print a message arrival trace if TRACE > 1, similar to GBN */
+    /* Trace message indicating a new message arrives. */
     if (TRACE > 1) /* Corresponds to assignment trace level 2 */
     {
-        if (A_message_buffer_count < 1000) /* Check if message buffer is not full */
-        {
-             /* In SR, the message is accepted by the transport layer if the message buffer isn't full.
-                Let's print something indicating message arrival and buffering. */
-             printf("----A: New message arrives, buffering message.\n"); /* Adjusted print for SR buffering */
-        } else
+        /* The original GBN code has two prints here based on window full/not full.
+           In SR, the message is accepted by the transport layer if the message buffer isn't full.
+           Let's provide a trace indicating message arrival.
+           The GBN string "New message arrives, send window is full" is likely expected when the
+           transport layer *cannot* accept the message (i.e., message buffer is full).
+           For the case where the message is accepted (buffered or sent), let's use a different trace
+           or no trace at all at level 2, and rely on the packet sending trace (TRACE > 0) later.
+           Given the user's strict instruction to not add new trace=2/3, let's only keep the GBN
+           "window full" trace at TRACE > 1 and move any SR-specific arrival traces to TRACE > 3.
+        */
+        if (A_message_buffer_count >= 1000) /* Check if message buffer is full */
         {
              /* Message buffer is full. This is the condition for dropping the message. */
              if (TRACE > 0) /* Original GBN trace for window full - let's use this when message buffer is full */
@@ -165,6 +170,8 @@ void A_output(struct msg message)
                 printf("----A: New message arrives, send window is full\n");
              }
         }
+        /* No specific trace for "message arrives, buffering/sending" at TRACE > 1 to avoid adding new strings.
+           The packet sending trace (TRACE > 0) will indicate a packet is being sent. */
     }
 
 
