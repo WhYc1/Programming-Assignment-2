@@ -146,15 +146,19 @@ void A_input(struct pkt packet) {
 
                 /* Slide the window base (windowfirst) past all contiguously acknowledged */
                 /* packets */
+                bool timer_reset = false;
                 while (windowcount > 0 && A_status[windowfirst] == AS_RCVD) {
                     A_status[windowfirst] = AS_NONE; /* Reset status for the buffer slot */
                     windowfirst = (windowfirst + 1) % WINDOWSIZE;
                     windowcount--;
+                    timer_reset = true;
                 }
 
                 /* Restart the single physical timer based on remaining packets */
-                stoptimer(A);
-                if (windowcount > 0) { starttimer(A, RTT); }
+                if (timer_reset) {
+                    stoptimer(A);
+                    if (windowcount > 0) { starttimer(A, RTT); }
+                }
 
             } else {
                 /* Received ACK for a packet already marked as RCVD (or somehow not SENT). */
