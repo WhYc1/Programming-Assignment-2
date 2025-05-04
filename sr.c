@@ -64,29 +64,10 @@ static int windowfirst, windowlast;   /* array indexes of the first/last packet 
 static int windowcount;               /* the number of packets currently awaiting an ACK */
 static int A_nextseqnum;              /* the next sequence number to be used by the sender */
 static int A_status[WINDOWSIZE];      /* Status of packets in the buffer */
-static double A_timers[WINDOWSIZE];   /* Remaining time for each packet's timer */
 
 #define AS_NONE 0 /* Slot is empty */
 #define AS_SENT 1 /* Packet sent, timer running, waiting for ACK */
 #define AS_RCVD 2 /* ACK received, but packet potentially not slided past yet */
-
-/* Helper function to recalculate and start the physical timer */
-void A_start_physical_timer() {
-    double min_timer_val = RTT + 1.0; /* Sentinel value larger than RTT */
-    int j;
-    int current_buf_idx;
-
-    /* Find the minimum remaining timer value among all AS_SENT packets */
-    for (j = 0; j < WINDOWSIZE; j++) { /* Iterate physical slots */
-        current_buf_idx = (windowfirst + j) % WINDOWSIZE;
-        if (j < windowcount && A_status[current_buf_idx] == AS_SENT && A_timers[current_buf_idx] >= 0) {
-            min_timer_val = min_double(min_timer_val, A_timers[current_buf_idx]);
-        }
-    }
-
-    /* Start the physical timer if there are active logical timers */
-    if (min_timer_val <= RTT) { starttimer(A, min_timer_val); }
-}
 
 /* called from layer 5 (application layer), passed the message to be sent to other side */
 void A_output(struct msg message) {
@@ -109,7 +90,6 @@ void A_output(struct msg message) {
         windowlast = (windowlast + 1) % WINDOWSIZE;
         buffer[windowlast] = sendpkt;
         A_status[windowlast] = AS_SENT;
-        A_timers[windowlast] = RTT;
         windowcount++;
 
         /* send out packet */
@@ -117,9 +97,7 @@ void A_output(struct msg message) {
         tolayer3(A, sendpkt);
 
         /* Start timer only if it's the first packet in the window */
-        if (windowcount == 1) {
-            A_start_physical_timer();
-        }
+        if (windowcount == 1) { starttimer(A, RTT); }
 
         /* get next sequence number, wrap back to 0 */
         A_nextseqnum = (A_nextseqnum + 1) % SEQSPACE;
@@ -169,7 +147,6 @@ void A_input(struct pkt packet) {
 
                     /* Mark packet as received and stop its logical timer */
                     A_status[ackidx] = AS_RCVD;
-                    A_timers[ackidx] = -1; /* Mark timer as inactive */
 
                     /* Slide the window base (windowfirst) past all contiguously acknowledged */
                     /* packets */
@@ -181,7 +158,7 @@ void A_input(struct pkt packet) {
 
                     /* Restart the single physical timer based on remaining packets */
                     stoptimer(A);
-                    A_start_physical_timer();
+                    if (windowcount > 0) { starttimer(A, RTT); }
 
                 } else {
                     /* Received ACK for a packet already marked as RCVD (or somehow not SENT). */
@@ -204,55 +181,29 @@ void A_input(struct pkt packet) {
 
 /* called when A's timer goes off */
 void A_timerinterrupt(void) {
-    double timeout_val = RTT + 1.0;
     int k;
     int idx;
     bool resent_any = false;
     double epsilon = 0.0001;
 
-    /* Find the minimum timer value among SENT packets. */
-    /* The timer interrupt signifies that *at least* the packet(s) with this minimum value have */
-    /* expired. */
-    for (k = 0; k < WINDOWSIZE; k++) {
+    /* Identify the first packet whose timers have effectively expired */
+    for (k = 0; k < windowcount; k++) {
         idx = (windowfirst + k) % WINDOWSIZE;
-        if (k < windowcount && A_status[idx] == AS_SENT && A_timers[idx] >= 0) {
-            if (A_timers[idx] < timeout_val) {
-                timeout_val = A_timers[idx];
-                /* Keep track of one index associated with timeout, for debug/understanding, not */
-                /* strictly needed by logic below first_timed_out_idx = current_idx; */
-            }
-        }
-    }
-
-    /* If no timers were active, this interrupt is spurious (shouldn't happen if managed correctly) */
-    if (timeout_val > RTT) {
-        /* Maybe add a non-trace print here if debugging: printf("Spurious timer interrupt?\n"); */
-        return;
-    }
-
-    /* Identify ALL packets whose timers have effectively expired */
-    for (k = 0; k < WINDOWSIZE; k++) {
-        idx = (windowfirst + k) % WINDOWSIZE;
-        if (k < windowcount && A_status[idx] == AS_SENT && A_timers[idx] >= 0) {
+        if (k < windowcount && A_status[idx] == AS_SENT) {
 
             /* Check if this packet's timer expired */
-            if (A_timers[idx] <= timeout_val + epsilon) {
-                /* This packet timed out */
-                if (!resent_any) {
-                    if (TRACE > 0) printf("----A: time out,resend packets!\n");
-                    resent_any = true;
-                }
-                if (TRACE > 0) printf("---A: resending packet %d\n", (buffer[idx]).seqnum);
-
-                tolayer3(A, buffer[idx]);
-                packets_resent++;
-                A_timers[idx] = RTT; /* Reset timer ONLY for the resent packet */
+            /* This packet timed out */
+            if (!resent_any) {
+                if (TRACE > 0) printf("----A: time out,resend packets!\n");
+                resent_any = true;
             }
-        }
-    }
+            if (TRACE > 0) printf("---A: resending packet %d\n", (buffer[idx]).seqnum);
 
-    /* Restart the physical timer for the new earliest expiration time */
-    A_start_physical_timer();
+            tolayer3(A, buffer[idx]);
+            packets_resent++;
+        }
+        if (k == 0) starttimer(A, RTT);
+    }
 }
 
 /* the following routine will be called once (only) before any other */
@@ -269,10 +220,7 @@ void A_init(void) {
     windowcount = 0;
 
     /* Initialize packet status and timers */
-    for (i = 0; i < WINDOWSIZE; i++) {
-        A_status[i] = AS_NONE;
-        A_timers[i] = -1.0; /* Use -1.0 to indicate inactive timer */
-    }
+    for (i = 0; i < WINDOWSIZE; i++) { A_status[i] = AS_NONE; }
 }
 
 /********* Receiver (B)  variables and procedures ************/
